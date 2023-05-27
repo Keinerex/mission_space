@@ -1,31 +1,18 @@
 import datetime
-import json
-import os
-from random import choices
-from uuid import uuid4
+from io import BytesIO
 
-from flask import Blueprint
+from flask import Blueprint, send_file, url_for
 from flask import jsonify, request
 from flask_jwt_extended import JWTManager, create_access_token, set_access_cookies, unset_jwt_cookies, jwt_required, \
     current_user, get_jwt_identity, get_jwt
 from werkzeug.security import generate_password_hash
-from werkzeug.utils import secure_filename
-from uuid import UUID
 
 from database import db
-from models import User, Task
-
-UPLOAD_FOLDER = os.path.abspath('files')
-ALLOWED_EXTENSIONS = {'mp4', 'pdf', 'png', 'jpg', 'jpeg'}
+from models import *
 
 bp = Blueprint('api', __name__)
 
 jwt = JWTManager()
-
-
-def allowed_file(filename):
-    return '.' in filename and \
-           filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
 @jwt.user_identity_loader
@@ -36,7 +23,7 @@ def user_identity_lookup(user):
 @jwt.user_lookup_loader
 def user_lookup_callback(_jwt_header, jwt_data):
     identity = jwt_data["sub"]
-    return User.query.filter_by(id=identity).one_or_none()
+    return UserInfo.query.filter_by(id=identity).one_or_none()
 
 
 @bp.after_request
@@ -54,102 +41,17 @@ def refresh_expiring_jwts(response):
         return response
 
 
-@bp.route("/students", methods=["GET"])
-@jwt_required()
-def get_students():
-    if current_user.isAdmin is True:
-        users = User.query.filter_by(isAdmin=False).all()
-        return jsonify({'users': [user.data for user in users]})
-    else:
-        return jsonify({"status": False, "message": "У мужлан нет прав"}), 401
-
-
-@bp.route("/is_admin", methods=["GET"])
-@jwt_required()
-def is_admin():
-    if current_user.isAdmin:
-        return jsonify({"status": True})
-    else:
-        return jsonify({"status": False})
-    return jsonify({"status": False, "message": "У мужлан нет прав"}), 401
-
-
-@bp.route("/update_code", methods=["GET"])
-@jwt_required()
-def update_code():
-    if current_user.isAdmin:
-        while True:
-            code = "".join(choices("1234567890", k=6))
-            codes = [i.code for i in User.query.filter_by(isAdmin=True).all()]
-            if code in codes:
-                continue
-            break
-        current_user.code = code
-        db.session.commit()
-        return jsonify({"status": True, "code": code})
-    else:
-        return jsonify({"status": False, "message": "У мужлан нет прав"}), 401
-
-
-@bp.route("/tasks", methods=["GET"])
-@jwt_required()
-def get_tasks():
-    tasks_data = json.loads(current_user.tasks)
-    print(tasks_data.keys())
-    tasks = db.session.query(Task).all()
-    return jsonify([task.data | {"status": tasks_data[str(task.id)]} for task in tasks if str(task.id) in tasks_data.keys()])
-
-
-@bp.route("/task/", methods=["GET"])
-@jwt_required()
-def get_task():
-    task_id = UUID(request.args.get("task_id", None))
-    task = Task.query.filter_by(id=task_id).one_or_none()
-    return jsonify(task.data)
-
-
-@bp.route("/task", methods=["POST"])
-@jwt_required()
-def post_task():
-    if current_user.isAdmin:
-        title = request.json.get("title", None)
-        description = request.json.get("description", None)
-        type = request.json.get("type", None)
-        people_id = request.json.get("people_id", None)
-        task = Task.query.filter_by(title=title).one_or_none()
-        if not task and title and people_id and type:
-            task = Task(title=title, description=description, type=type, fp="DICK", people_id=people_id)
-            db.session.add(task)
-            users = db.session.query(User).all()
-            for user in users:
-                if str(user.id) in people_id:
-                    user.tasks = json.dumps(json.loads(user.tasks) | {str(task.id): False})
-                    db.session.commit()
-
-            db.session.commit()
-            return jsonify({"status": True})
-        return jsonify({"status": False})
-
-
-@bp.route("/set_task_status", methods=["PUT"])
-@jwt_required()
-def set_task_status():
-    task_id = request.json.get("task_id", None)
-    data = json.loads(current_user.tasks)
-    data[str(task_id)] = True
-    current_user.tasks = json.dumps(data)
-    db.session.commit()
-    return jsonify({"status": True})
-
-
 @bp.route("/login", methods=["POST"])
 def login():
-    username = request.json.get("username", None)
+    email = request.json.get("email", None)
+    phone = request.json.get("phone", None)
     password = request.json.get("password", None)
-    print(request.json)
-    print(username, password)
+
     try:
-        user = User.query.filter_by(username=username).one_or_none()
+        if email:
+            user = UserInfo.query.filter_by(email=email).one_or_none()
+        elif phone:
+            user = UserInfo.query.filter_by(phone=phone).one_or_none()
     except Exception as e:
         return jsonify({"msg": "error"})
 
@@ -164,13 +66,45 @@ def login():
 
 @bp.route("/register", methods=["POST"])
 def register():
-    username = request.json.get("username", None)
+    first_name = request.json.get("first_name", None)
+    last_name = request.json.get("last_name", None)
+    second_name = request.json.get("second_name", None)
+    region_id = request.json.get("region_id", None)
+    email = request.json.get("email", None)
+    phone = request.json.get("phone", None)
     password = request.json.get("password", None)
 
-    user = User.query.filter_by(username=username).one_or_none()
+    if email:
+        user = UserInfo.query.filter_by(email=email).one_or_none()
+    elif phone:
+        user = UserInfo.query.filter_by(phone=phone).one_or_none()
 
-    if not user and username and password:
-        db.session.add(User(username=username, password_hash=generate_password_hash(password)))
+    if not user and first_name and last_name and second_name and region_id and password and (email or phone):
+        db.session.add(UserInfo(email=email, first_name=first_name, last_name=last_name, second_name=second_name,
+                                region_id=region_id, phone=phone, password=generate_password_hash(password)))
+        db.session.commit()
+        return jsonify({"status": True})
+
+    return jsonify({"status": False})
+
+
+@bp.route("/update_userdata", methods=["PUT"])
+@jwt_required()
+def update_userdata():
+    first_name = request.json.get("first_name", None)
+    last_name = request.json.get("last_name", None)
+    second_name = request.json.get("second_name", None)
+    region_id = request.json.get("second_name", None)
+    email = request.json.get("email", None)
+    phone = request.json.get("phone", None)
+
+    if first_name and last_name and second_name and region_id and (email or phone):
+        current_user.first_name = first_name
+        current_user.last_name = last_name
+        current_user.second_name = second_name
+        current_user.region_id = region_id
+        current_user.email = email
+        current_user.phone = phone
         db.session.commit()
         return jsonify({"status": True})
 
@@ -188,3 +122,100 @@ def logout_with_cookies():
 @jwt_required()
 def get_user_data():
     return jsonify(current_user.data)
+
+
+@bp.route("/organization", methods=["POST"])
+@jwt_required()
+def create_organization():
+    short_name = request.json.get("short_name", None)
+    full_name = request.json.get("full_name", None)
+    address = request.json.get("address", None)
+    tax_number = request.json.get("tax_number", None)
+    email = request.json.get("email", None)
+    site = request.json.get("site", None)
+    confirmed = request.json.get("confirmed", None)
+    logo_id = request.json.get("logo_id", None)
+    region_id = request.json.get("region_id", None)
+    city_id = request.json.get("city_id", None)
+
+    organization = Organization.query.filter_by(full_name=full_name).one_or_none()
+
+    if not organization and short_name and full_name and address and tax_number and email \
+            and site and confirmed and region_id and city_id:
+        organization = Organization(short_name=short_name, full_name=full_name, address=address, tax_number=tax_number,
+                                    email=email, site=site, confirmed=confirmed, logo_id=logo_id, region_id=region_id,
+                                    city_id=city_id)
+        db.session.add(organization)
+        current_user.organization_id = organization.id
+        admin_role = Role.query.filter_by(name="Admin").one_or_none()
+        current_user.role_id = admin_role.id
+        db.session.commit()
+        return jsonify({"status": True})
+
+    return jsonify({"status": False})
+
+
+@bp.route("/events", methods=["GET"])
+def get_events():
+    return jsonify([
+        {
+            "id": event.id,
+            "name": event.name,
+            "online": event.online,
+            "start_date": event.start_date,
+            "end_date": event.end_date,
+            "level": event.level.name,
+            "ages": event.ages,
+            "organization_id": event.organization_id,
+            "files": event.files,
+            "status": event.status.name
+        } for event in db.session.query(Event).all()])
+
+
+@bp.route("/event", methods=["POST"])
+@jwt_required()
+def get_event():
+    if current_user.role_id == Role.query.filter_by(name="Admin").one_or_none().id:
+        name = request.json.get("name", None)
+        description = request.json.get("description", None)
+        reg_form = request.json.get("reg_form", None)
+        online = request.json.get("online", None)
+        fcdo = request.json.get("fcdo", None)
+        start_date = request.json.get("start_date", None)
+        end_date = request.json.get("end_date", None)
+        level_id = request.json.get("level_id", None)
+        ages = request.json.get("ages", None)
+        organization_id = request.json.get("organization_id", None)
+        extra = request.json.get("extra", None)
+        banner_id = request.json.get("banner_id", None)
+        doc_id = request.json.get("doc_id", None)
+        status_id = request.json.get("status_id", None)
+        origin = request.json.get("origin", None)
+
+        event = Event.query.filter_by(name=name).one_or_none()
+
+        if not event and name and description and online and fcdo and start_date and level_id and ages \
+                and organization_id and banner_id and doc_id and status_id:
+            db.session.add(Event(name=name, description=description, reg_form=reg_form, online=online, fcdo=fcdo,
+                                 start_date=start_date, end_date=end_date, level_id=level_id, ages=ages,
+                                 organization_id=organization_id, extra=extra, status_id=status_id, origin=origin))
+            db.session.commit()
+            return jsonify({"status": True})
+
+    return jsonify({"status": False})
+
+
+@bp.route("/file/<id>", methods=["GET"])
+def get_file(id):
+    file = File.query.filter_by(id=id).one_or_none()
+    return send_file(BytesIO(file.data), download_name=file.name, as_attachment=True)
+
+
+@bp.route("/file", methods=["POST"])
+def add_file():
+    upload = request.files["file"]
+    file = File(name=upload.filename, data=upload.read())
+    db.session.add(file)
+    db.session.commit()
+    return jsonify({"status": True})
+
